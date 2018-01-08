@@ -4474,12 +4474,12 @@ void CClientVehicle::HandleWaitingForGroundToLoad ( void )
 
     #ifdef ASYNC_LOADING_DEBUG_OUTPUTA
         OutputDebugLine ( SStringX ( "[AsyncLoading] " ) + status );
-        g_pCore->GetGraphics ()->DrawText ( 10, 220, -1, 1, status );
+        g_pCore->GetGraphics ()->DrawString ( 10, 220, -1, 1, status );
 
         std::vector < SString > lineList;
         strAround.Split ( "\n", lineList );
         for ( unsigned int i = 0 ; i < lineList.size () ; i++ )
-            g_pCore->GetGraphics ()->DrawText ( 10, 230 + i * 10, -1, 1, lineList[i] );
+            g_pCore->GetGraphics ()->DrawString ( 10, 230 + i * 10, -1, 1, lineList[i] );
     #endif
 }
 
@@ -4876,6 +4876,22 @@ bool CClientVehicle::DoesSupportUpgrade ( const SString& strFrameName )
         return m_pVehicle->DoesSupportUpgrade ( strFrameName );
     }
     return true;
+}
+
+void CClientVehicle::SetModelExhaustFumesPosition(unsigned short modelID, const CVector& position)
+{
+    auto pModelInfo = g_pGame->GetModelInfo(modelID);
+    if (pModelInfo)
+        pModelInfo->SetVehicleExhaustFumesPosition(position);
+}
+
+CVector CClientVehicle::GetModelExhaustFumesPosition(unsigned short modelID)
+{
+    auto pModelInfo = g_pGame->GetModelInfo(modelID);
+    if (pModelInfo)
+        return pModelInfo->GetVehicleExhaustFumesPosition();
+
+    return CVector();
 }
 
 bool CClientVehicle::OnVehicleFallThroughMap ( )

@@ -351,6 +351,7 @@ WString devicePathToWin32Path ( const WString& strDevicePath )
 
 typedef WINBASEAPI BOOL (WINAPI *LPFN_QueryFullProcessImageNameW)(__in HANDLE hProcess, __in DWORD dwFlags, __out_ecount_part(*lpdwSize, *lpdwSize) LPWSTR lpExeName, __inout PDWORD lpdwSize);
 
+
 ///////////////////////////////////////////////////////////////////////////
 //
 // GetProcessPathFilename
@@ -433,6 +434,35 @@ SString GetProcessPathFilename ( DWORD processID )
     }
 
     return "";
+}
+
+
+///////////////////////////////////////////////////////////////////////////
+//
+// GetProcessFilename
+//
+// More reliable than GetProcessPathFilename, but no path
+//
+///////////////////////////////////////////////////////////////////////////
+SString GetProcessFilename(DWORD processID)
+{
+    SString strFilename;
+    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    PROCESSENTRY32W pe = {sizeof(PROCESSENTRY32W)};
+    if( Process32FirstW(hSnapshot, &pe))
+    {
+    	do
+        {
+    		if (pe.th32ProcessID == processID)
+            {
+                strFilename = ToUTF8(pe.szExeFile);
+                break;
+    		}
+    	}
+        while( Process32NextW(hSnapshot, &pe));
+    }
+    CloseHandle(hSnapshot);
+    return strFilename;
 }
 
 
@@ -933,6 +963,63 @@ bool HasGTAPath ( void )
 
 ///////////////////////////////////////////////////////////////
 //
+// GetPEFileOffsets
+//
+// Get some commonly used file offsets
+//
+///////////////////////////////////////////////////////////////
+void GetPEFileOffsets(SPEFileOffsets& outOffsets, const SString& strGTAEXEPath)
+{
+    outOffsets = {0};
+    long NtHeaders = 0;
+    ReadFileValue(strGTAEXEPath, NtHeaders, offsetof(IMAGE_DOS_HEADER, e_lfanew));
+    outOffsets.TimeDateStamp = NtHeaders + offsetof(IMAGE_NT_HEADERS, FileHeader.TimeDateStamp);
+    outOffsets.Characteristics = NtHeaders + offsetof(IMAGE_NT_HEADERS, FileHeader.Characteristics);
+    outOffsets.AddressOfEntryPoint = NtHeaders + offsetof(IMAGE_NT_HEADERS, OptionalHeader.AddressOfEntryPoint);
+    outOffsets.DllCharacteristics = NtHeaders + offsetof(IMAGE_NT_HEADERS, OptionalHeader.DllCharacteristics);
+
+    ushort usSizeOfOptionalHeader = 0;
+    ReadFileValue(strGTAEXEPath, usSizeOfOptionalHeader, NtHeaders + offsetof(IMAGE_NT_HEADERS, FileHeader.SizeOfOptionalHeader));
+    ReadFileValue(strGTAEXEPath, outOffsets.sections[0].PointerToRawData, NtHeaders + offsetof(IMAGE_NT_HEADERS, OptionalHeader) + usSizeOfOptionalHeader + offsetof(IMAGE_SECTION_HEADER, PointerToRawData));
+}
+
+
+///////////////////////////////////////////////////////////////
+//
+// GetGtaFileVersion
+//
+// Hardcoded numbers used:
+//  0x44 - File offset 0x44 is zero in legacy DOS stub. Encrypted exe does not have this.
+//  0x347ADD is the section offset equivalent of 0x748ADD as used in CGameSA::FindGameVersion
+//  0x53FF and 0x840F are also used in CGameSA::FindGameVersion
+//
+///////////////////////////////////////////////////////////////
+EGtaFileVersion GetGtaFileVersion(const SString& strGTAEXEPath)
+{
+    SPEFileOffsets fileOffsets;
+    GetPEFileOffsets(fileOffsets, strGTAEXEPath);
+
+    char bIsEncypted = false;
+    ushort usIdBytes = 0;
+    ReadFileValue(strGTAEXEPath, bIsEncypted, 0x44);
+    ReadFileValue(strGTAEXEPath, usIdBytes, 0x347ADD + fileOffsets.sections[0].PointerToRawData);
+
+    EGtaFileVersion versionType = EGtaFileVersion::Unknown;
+    if (usIdBytes == 0x53FF)
+        versionType = EGtaFileVersion::US;
+    else
+    if (usIdBytes == 0x840F)
+        versionType = EGtaFileVersion::EU;
+    else
+    if (bIsEncypted)
+        versionType = EGtaFileVersion::Encrypted;
+
+    return versionType;
+}
+
+
+///////////////////////////////////////////////////////////////
+//
 // FindFilesRecursive
 //
 // Return a list of files inside strPath
@@ -1123,20 +1210,6 @@ bool IsWindows10Threshold2OrGreater ( void )
 
 ///////////////////////////////////////////////////////////////
 //
-// IsVS2013RuntimeInstalled
-//
-// Only checks registry settings, so install could still be invalid
-//
-///////////////////////////////////////////////////////////////
-bool IsVS2013RuntimeInstalled( void )
-{
-    SString strInstall = GetSystemRegistryValue( (uint)HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\DevDiv\\vc\\Servicing\\12.0\\RuntimeMinimum", "Install" );
-    return strInstall == "\x01";
-}
-
-
-///////////////////////////////////////////////////////////////
-//
 // IsUserAdmin
 //
 //
@@ -1177,17 +1250,20 @@ Return Value:
 }
 
 
-static SString HashBuffer ( char* pData, uint uiLength )
+//////////////////////////////////////////////////////////
+//
+// RelaunchAsAdmin
+//
+// Relaunch as admin if user agrees
+//
+//////////////////////////////////////////////////////////
+void RelaunchAsAdmin(const SString& strCmdLine, const SString& strReason)
 {
-    DWORD dwSum1 = 0;
-    DWORD dwSum2 = 0x1234;
-    for ( uint i = 0 ; i < uiLength ; i++ )
-    {
-        dwSum1 += pData[i];
-        dwSum2 += pData[i];
-        dwSum2 ^= ( dwSum2 << 2 ) + 0x93;
-    }
-    return SString ( "%08x%08x%08x", dwSum1, dwSum2, uiLength );
+    HideSplash();
+    AddReportLog(7115, SString("Loader - Request to elevate privilages (%s)", *strReason));
+    MessageBoxUTF8(NULL, SString ( _("MTA:SA needs Administrator access for the following task:\n\n  '%s'\n\nPlease confirm in the next window."), *strReason), "Multi Theft Auto: San Andreas", MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
+    ReleaseSingleInstanceMutex();
+    ShellExecuteNonBlocking("runas", PathJoin(GetMTASAPath(), MTA_EXE_NAME), strCmdLine);            
 }
 
 
@@ -1390,11 +1466,26 @@ bool Is32bitProcess ( DWORD processID )
 ///////////////////////////////////////////////////////////////////////////
 void TerminateProcess( DWORD dwProcessID, uint uiExitCode )
 {
-    HANDLE hProcess = OpenProcess( PROCESS_TERMINATE, 0, dwProcessID );
-    if ( hProcess )
+    HMODULE hModule = GetLibraryHandle ( "kernel32.dll" );
+    if ( hModule )
     {
-        TerminateProcess( hProcess, uiExitCode );
-        CloseHandle( hProcess );
+        typedef bool (*PFNTerminateProcess) ( uint, uint );
+        PFNTerminateProcess pfnTerminateProcess = static_cast< PFNTerminateProcess > ( static_cast < PVOID > ( GetProcAddress ( hModule, "NtTerminateProcess" ) ) );
+
+        if ( pfnTerminateProcess )
+        {
+            bool bResult = pfnTerminateProcess ( dwProcessID, uiExitCode );
+            AddReportLog ( 8070, SString ( "TerminateProcess %d result: %d", dwProcessID, bResult ) );
+        }
+        else
+        {
+            HANDLE hProcess = OpenProcess( PROCESS_TERMINATE, 0, dwProcessID );
+            if ( hProcess )
+            {
+                TerminateProcess( hProcess, uiExitCode );
+                CloseHandle( hProcess );
+            }
+        }
     }
 }
 
