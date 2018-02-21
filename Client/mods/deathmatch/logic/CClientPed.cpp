@@ -5123,6 +5123,7 @@ bool CClientPed::IsGettingOutOfVehicle ( void )
                     switch ( pSubTask->GetTaskType () )
                     {
                         case TASK_SIMPLE_CAR_GET_OUT:
+                        case TASK_SIMPLE_CAR_JUMP_OUT:
                         case TASK_SIMPLE_CAR_CLOSE_DOOR_FROM_OUTSIDE:
                         {
                             return true;
@@ -6041,6 +6042,12 @@ bool CClientPed::ReloadWeapon ( void )
         }
     }
     return false;
+}
+
+
+bool CClientPed::IsReloadingWeapon(void)
+{
+    return GetWeapon()->GetState() == WEAPONSTATE_RELOADING;
 }
 
 
